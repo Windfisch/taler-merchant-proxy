@@ -4,16 +4,62 @@ import argparse, os, random, sys, requests
 
 from socketserver import ThreadingMixIn
 import threading
+import re
+
+authorization = {
+    "default": "Bearer secret-token:supersecret",
+    "konsum": "Bearer secret-token:supersecret"
+}
+authorization_lite = {
+    "default": "Bearer secret-token:hello",
+    "konsum": "Bearer secret-token:hello"
+}
 
 def check_auth(path, headers, method):
-    print("check_auth ", path, headers, method)
-    return (True, {'Authorization': 'Bearer secret-token:supersecret'})
+    match = re.match("/instances/([a-zA-Z0-9_]+)/private/orders(/[-a-zA-Z0-9_.]+)?", path)
+    if match:
+        instance = match[1]
+        order = match[2]
+        
+        print("checking auth: '%s' request for instance=%s and order %s" % (method, instance, order))
+
+        if (method == 'get' and order is not None) or (method in ['post', 'delete'] and order is None):
+            try:
+                print("\trequest is elegible")
+                actual_auth = headers['authorization']
+                replace_auth = authorization[instance]
+                needed_auth = authorization_lite[instance]
+
+                print("\tchecking")
+
+                if actual_auth == needed_auth:
+                    return (True, {'authorization': replace_auth})
+            except:
+                pass
+        return (False, {})
+    else:
+        return (False, {})
 
 class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     def do_HEAD(self):
         self.do_GET(body=False)
         return
+
+    def do_OPTIONS(self, body=True):
+        try:
+            req_header = self.parse_headers()
+            url = 'https://{}{}'.format(hostname, self.path)
+            resp = requests.options(url, headers=req_header, verify=False)
+
+            self.send_response(resp.status_code)
+            self.send_resp_headers(resp)
+            msg = resp.text
+            if body:
+                self.wfile.write(msg.encode(encoding='UTF-8',errors='strict'))
+        except:
+            self.send_error(502, 'Internetkurort Bad Gateway')
+        
         
     def do_GET(self, body=True):
         try:
@@ -60,9 +106,16 @@ class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if allow:
                 url = 'https://{}{}'.format(hostname, self.path)
-                content_len = int(self.headers.getheader('content-length', 0))
+                print("content len")
+                content_len = 0
+                try:
+                    content_len = int(req_header['content-length'])
+                except:
+                    content_len = 0
+                print("content len", content_len)
                 post_body = self.rfile.read(content_len)
                 resp = requests.post(url, data=post_body, headers=(req_header | new_headers), verify=False)
+                print("send")
                 self.send_response(resp.status_code)
                 self.send_resp_headers(resp)
                 if body:
@@ -73,16 +126,10 @@ class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(502, 'Internetkurort Bad Gateway')
 
     def parse_headers(self):
-        req_header = {}
-        for line in self.headers:
-            line_parts = [o.strip() for o in line.split(':', 1)]
-            if len(line_parts) == 2:
-                req_header[line_parts[0]] = line_parts[1]
-        return req_header
+        return {a.lower():b for (a,b) in self.headers.items() if a.lower() not in ['host']}
 
     def send_resp_headers(self, resp):
         respheaders = resp.headers
-        print ('Response Header')
         for key in respheaders:
             if key.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
                 self.send_header(key, respheaders[key])
